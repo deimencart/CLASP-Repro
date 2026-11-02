@@ -1,153 +1,137 @@
 # CLASP: Cloth Assistance with Semantic Keypoints & Interactive Perception
 
-> **Independent Academic Reproduction & Experimental Implementation**  
-> *Reference Paper: CLASP: General-Purpose Clothes Manipulation with Semantic Keypoints (Deng et al., IJRR 2026 / ICRA 2025 / arXiv:2502.17983)*  
-> *Core Focus: Zero-Shot Dense Semantic Matching (Frozen DINOv2 ViT), 3D Pinhole Deprojection, and Closed-Loop Interactive Perception (Tactile Touchdown & Proprioceptive Verification)*
+> **Reproducción Académica e Implementación Experimental**  
+> *Referencia: CLASP: General-Purpose Clothes Manipulation with Semantic Keypoints (Deng et al., 2025)*  
+> *Tecnologías: PyTorch, DINOv2 ViT, Pinhole 3D, FSM de Control en Bucle Cerrado*
 
 ---
 
 > [!IMPORTANT]
-> **Academic Reproduction & Non-Plagiarism Disclaimer**  
-> This repository is an **independent academic reproduction and experimental implementation** created strictly for research, testing, and educational purposes in robotics and artificial intelligence. All foundational theoretical concepts, algorithmic architectures, and task formulations are fully attributed to the original authors (*Deng et al., 2025*). This work does not claim ownership of the original methodology and is published without commercial intent or purpose of plagiarism.
+> **Aviso de Reproducción Académica (Sin fines de plagio)**  
+> Este repositorio contiene una **reproducción experimental e implementación académica independiente** realizada con fines educativos y de investigación en robótica. Todos los conceptos teóricos, la formulación del problema y el diseño de la arquitectura original pertenecen y son atribuidos a sus autores originales (*Deng et al., 2025*). Esta implementación no tiene fines comerciales ni intención de plagio.
 
 ---
 
-## Quick Navigation Index
+## 📌 ¿Qué problema resuelve este proyecto?
 
-| Section | Description | Direct Link |
-| :--- | :--- | :--- |
-| **System Overview** | Vision foundation model matching and closed-loop tactile grasp | [System Overview](#system-overview) |
-| **Mathematical Formulation** | Dense cosine similarity, SE(3) transformation, FSM thresholds | [Mathematical Formulation](#mathematical-formulation) |
-| **Interactive Perception** | Closed-loop touch: hover, touchdown (3N), proprioception | [Interactive Perception](#interactive-perception) |
-| **Experimental Results** | Keypoint transfer across diverse garment instances (jeans, chinos) | [Experimental Results](#experimental-results) |
-| **Repository Structure** | Codebase layout across pipeline, perception, data, and docs | [Repository Structure](#repository-structure) |
-| **Execution Guide** | Step-by-step instructions to extract features and run matching | [Execution Guide](#execution-guide) |
+En la manipulación robótica de ropa, detectar dónde agarrar una prenda deformada (arrugada, doblada o desordenada) suele requerir entrenar detectores supervisados que fallan si cambia el color, el tipo de tela o la postura.
+
+**CLASP** resuelve esto mediante dos ideas centrales:
+1. **Transferencia Semántica Zero-Shot:** Usar un modelo de fundación visual congelado (**DINOv2**) que ya entiende partes semánticas de los objetos. Solo anotamos una prenda de referencia (prototipo canónico) y el algoritmo encuentra automáticamente esos mismos puntos (cintura, bolsillos, botamangas, tiro) en cualquier prenda nueva, sin reentrenar ninguna red neuronal.
+2. **Percepción Interactiva en Bucle Cerrado:** La visión sola no basta porque la ropa resbala o se pueden agarrar múltiples capas por error. La pinza del robot utiliza contacto físico y lecturas hápticas para garantizar un agarre correcto antes de levantar la prenda.
 
 ---
 
-## System Overview
+## 🛠️ ¿Qué implementamos en este repositorio?
 
-Manipulating crumpled garments across unseen categories requires landmark semantic correspondence without expensive fine-tuning. This repository implements the **CLASP** framework, combining zero-shot dense visual descriptors with closed-loop physical interaction:
+El pipeline implementado cubre desde la imagen RGB-D hasta la ejecución cinemática en el robot:
 
 ```
-+-----------------------------------+       +-----------------------------------+
-|  Canonical Prototype Annotation   |       |    Observed Test Garment RGB-D    |
-|   (Annotated landmarks {q_k})     |       |   (Arbitrary pose, crumpled cloth)|
-+-----------------+-----------------+       +-----------------+-----------------+
-                  |                                           |
-                  +---------------------+---------------------+
-                                        |
-                                        v
-                    [ Frozen DINOv2 Feature Extractor ]
-                           (Normalized f(p) in R^D)
-                                        |
-                                        v
-                    [ Coarse-to-Fine Landmark Matching ]
-                       p_k* = argmax cos(f_obs, f_proto)
-                                        |
-                                        v
-                   [ 3D Pinhole & Frame Deprojection SE(3) ]
-                     p_base = T_base^cam * (Z * K^-1 * [u, v, 1]^T)
-                                        |
-                                        v
-                    [ Closed-Loop Interactive Perception FSM ]
-                     ├── 1. Hover (+6 cm normal to cloth)
-                     ├── 2. Touchdown (F_z >= 3.0 N)
-                     ├── 3. Proprioceptive Grip Verification (delta_grip)
-                     └── 4. Lift-and-Verify (+15 cm tension check)
+[ Prenda Prototipo Anotada ]           [ Prenda Real Observada (RGB-D) ]
+             |                                       |
+             +-------------------+-------------------+
+                                 |
+                                 v
+                 [ Extractor DINOv2 ViT-B/14 ]
+                   (Descriptores densos en GPU)
+                                 |
+                                 v
+                 [ Matching Semántico Grueso a Fino ]
+                   (Localización de keypoints)
+                                 |
+                                 v
+                 [ Desproyección Pinhole 3D (SE3) ]
+                   (Coordenadas cartesianas del robot)
+                                 |
+                                 v
+                 [ FSM de Percepción Interactiva ]
+                   1. Hover (+6 cm sobre la tela)
+                   2. Touchdown táctil (Fz >= 3.0 N)
+                   3. Verificación de grosor de mordazas
+                   4. Elevación y verificación de agarre
 ```
 
-### Visual Highlights
+### 1. Extracción y Emparejamiento Semántico
+* **Extractor DINOv2 (`src/02_dino_extractor.py`):** Pasa la imagen por un ViT-B/14 congelado y normaliza los vectores descriptores por píxel en GPU.
+* **Matcher de Keypoints (`src/03_matcher.py`):** Compara los descriptores de la prenda observada contra la prenda prototipo mediante similitud coseno, transfiriendo los puntos clave de agarre de forma inmediata.
+* **Alineación de Rotación (`src/04_rotation_aligner.py`):** Normaliza la orientación 2D en el plano para facilitar el matching si la prenda está rotada.
 
-| Semantic Matching on Real Jeans 2 | Semantic Matching on Real Jeans 3 |
+### 2. Desproyección Pinhole a Marco del Robot
+* **Desproyector 3D (`src/05_deprojector_3d.py`):** Toma las coordenadas de píxel $(u, v)$ y la profundidad métrica $Z$ de la cámara, desproyecta a coordenadas 3D y aplica la transformación mano-ojo $T_{\text{base}}^{\text{cam}}$ para darle la meta exacta en metros al brazo robótico.
+
+### 3. Máquina de Estados de Agarre en Bucle Cerrado
+* **Percepción Interactiva (`src/clasp_interactive_perception.py`):**
+  * **Hover:** Posiciona el efector final a $+6\,\text{cm}$ sobre el punto de agarre en dirección normal a la superficie.
+  * **Touchdown Háptico:** Desciende a velocidad controlada ($1.5\,\text{cm/s}$) hasta detectar un contacto vertical de $F_z \ge 3.0\,\text{N}$, evitando colisiones bruscas contra la mesa.
+  * **Discriminación de Capas:** Mide la apertura residual de los dedos de la pinza para comprobar si atrapó tela con éxito (evitando cierres en falso o agarres de bordes dobles excesivamente gruesos).
+  * **Lift & Verify:** Eleva la prenda $+15\,\text{cm}$ verificando la estabilidad de la carga.
+
+---
+
+## 📊 Evidencias y Resultados Visuales
+
+El sistema transfiere los keypoints semánticos con precisión a diferentes prendas reales (vaqueros, chinos y pantalones de chándal):
+
+| Vaqueros Reales (Prueba 2) | Vaqueros Reales (Prueba 3) |
 | :---: | :---: |
-| ![Jeans 2 Match](docs/images/match_real_jeans_2.png) | ![Jeans 3 Match](docs/images/match_real_jeans_3.png) |
+| ![Matching Jeans 2](docs/images/match_real_jeans_2.png) | ![Matching Jeans 3](docs/images/match_real_jeans_3.png) |
 
-| Cross-Garment Transfer (Chino) | Cross-Garment Transfer (Sweatpants) |
+| Transferencia a Pantalón Chino | Transferencia a Pantalón Deportivo |
 | :---: | :---: |
-| ![Chino Match](docs/images/match_trousers_chino_beige.png) | ![Sweatpants Match](docs/images/match_trousers_sweatpants_grey.png) |
+| ![Matching Chino](docs/images/match_trousers_chino_beige.png) | ![Matching Sweatpants](docs/images/match_trousers_sweatpants_grey.png) |
 
 ---
 
-## Mathematical Formulation
-
-### 1. Dense Semantic Descriptor Matching (Frozen DINOv2)
-Rather than training brittle task-specific keypoint detectors, semantic representations are extracted from an un-finetuned foundation model (DINOv2 ViT-B/14):
-$$\mathbf{f}(p) = \frac{\phi_{\text{ViT}}(I, p)}{\|\phi_{\text{ViT}}(I, p)\|_2} \in \mathbb{R}^D$$
-Given an annotated prototype $I_{\text{proto}}$ with keypoint coordinates $\{q_k\}_{k=1}^K$, the corresponding location $p_k^*$ in the observed scene $I_{\text{obs}}$ is found by maximizing cosine similarity:
-$$p_k^* = \arg\max_{p \in \Omega} \frac{\mathbf{f}_{\text{obs}}(p)^\top \mathbf{f}_{\text{proto}}(q_k)}{\|\mathbf{f}_{\text{obs}}(p)\|_2 \|\mathbf{f}_{\text{proto}}(q_k)\|_2}$$
-
-### 2. Pinhole Deprojection & Base Frame Transformation
-Given the metric depth $Z = d(u, v)$ and camera intrinsic matrix $K$, the 2D keypoint is lifted to 3D camera coordinates and transformed to the manipulator base frame $\mathcal{F}_{\text{base}}$ via hand-eye extrinsic $T_{\text{base}}^{\text{cam}} \in SE(3)$:
-$$\mathbf{p}_{\text{cam}} = Z \cdot K^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix}, \quad \mathbf{p}_{\text{base}} = T_{\text{base}}^{\text{cam}} \begin{bmatrix} \mathbf{p}_{\text{cam}} \\ 1 \end{bmatrix}_{1:3}$$
-
----
-
-## Interactive Perception
-
-Open-loop visual grasping often fails due to cloth slippage, table collisions, or grasping multiple layers unintentionally. The closed-loop FSM (`clasp_interactive_perception.py`) guarantees robust physical execution:
-
-1. **Approach & Hover:** Moves the end-effector to a standoff position $+6.0\,\text{cm}$ above $\mathbf{p}_{\text{base}}$ along the surface normal vector.
-2. **Tactile Touchdown:** Drives the gripper downward at constant velocity ($1.5\,\text{cm/s}$) until an axial normal force threshold is triggered:
-   $$F_z \ge 3.0\,\text{N}$$
-   preventing excessive reaction torques on robot joints and adapting to uneven surfaces.
-3. **Proprioceptive Grasp Discrimination:** Closes gripper fingers and measures the residual gap $\delta_{\text{grip}}$:
-   $$\delta_{\text{min}} \le \delta_{\text{grip}} \le \delta_{\text{max}}$$
-   * If $\delta_{\text{grip}} < \delta_{\text{min}}$: Gripper missed the fabric (empty closure).
-   * If $\delta_{\text{grip}} > \delta_{\text{max}}$: Multiple accidental layers or thick hem captured.
-4. **Lift-and-Verify:** Ascends $+15\,\text{cm}$ vertically to confirm stable tension.
-
----
-
-## Repository Structure
+## 📁 Estructura del Repositorio
 
 ```text
 clasp_semantic_keypoints/
-├── .gitignore
-├── README.md                                 <- Master documentation
+├── README.md                                 <- Documentación general
+├── .gitignore                                <- Exclusiones de Git
 ├── docs/
-│   ├── CLASP_SemanticKeypoints_2025.pdf      <- Reference paper (Deng et al.)
-│   ├── 01_CLASP_Framework_and_First_Principles.md <- Epistemic study guide
-│   ├── 02_CLASP_Foundation_Models_Ecosystem.md   <- Foundation models architecture
-│   └── images/                               <- Semantic matching visualizations
+│   ├── CLASP_SemanticKeypoints_2025.pdf      <- Paper científico original
+│   ├── 01_CLASP_Framework_and_First_Principles.md
+│   ├── 02_CLASP_Foundation_Models_Ecosystem.md
+│   └── images/                               <- Evidencias de matching
 ├── src/
-│   ├── 02_dino_extractor.py                  <- DINOv2 dense GPU feature extractor
-│   ├── 03_matcher.py                         <- Coarse-to-fine keypoint matcher
-│   ├── 04_rotation_aligner.py                <- 2D in-plane orientation normalizer
-│   ├── 05_deprojector_3d.py                  <- Pinhole inverse 3D transformer
-│   ├── clasp_interactive_perception.py       <- Complete closed-loop FSM (touchdown & verify)
-│   ├── action_primitives.py                  <- Motion planning primitives
-│   ├── inference.py                          <- End-to-end evaluation runner
-│   ├── simulation_utils.py                   <- Simulation interface helpers
-│   └── metric.py                             <- Landmark error evaluation
+│   ├── 02_dino_extractor.py                  <- Extracción DINOv2 en GPU
+│   ├── 03_matcher.py                         <- Algoritmo de correspondencia
+│   ├── 04_rotation_aligner.py                <- Alineador de ángulo 2D
+│   ├── 05_deprojector_3d.py                  <- Conversor Pinhole 2D a 3D robot
+│   ├── clasp_interactive_perception.py       <- FSM de bucle cerrado (Touchdown + Agarre)
+│   ├── action_primitives.py                  <- Primitivas de movimiento
+│   ├── inference.py                          <- Script de evaluación completa
+│   ├── simulation_utils.py                   <- Utilerías de simulación
+│   └── metric.py                             <- Evaluación métrica de error
 └── data/
-    ├── prototypes/                           <- Reference annotated prototypes
-    └── samples/                              <- Real garment evaluation images
+    ├── prototypes/                           <- Prendas y anotaciones de referencia
+    └── samples/                              <- Muestras fotográficas de prueba
 ```
 
 ---
 
-## Execution Guide
+## 🚀 Guía Rápida de Ejecución
 
-### 1. Requirements & Dependencies
+### 1. Dependencias
 ```bash
 pip install torch torchvision numpy opencv-python scipy matplotlib
 ```
 
-### 2. Extract Features & Run Semantic Matching
+### 2. Ejecutar Matching de Keypoints
+Extrae descriptores y calcula la correspondencia semántica:
 ```bash
 python src/02_dino_extractor.py
 python src/03_matcher.py
 ```
 
-### 3. Run Closed-Loop Interactive Perception (Simulation / Robot)
+### 3. Ejecutar Percepción Interactiva
+Ejecuta la máquina de estados con aproximación, touchdown por fuerza y verificación de agarre:
 ```bash
 python src/clasp_interactive_perception.py
 ```
 
 ---
 
-## References & Attribution
-
+## 📚 Referencias
 * Deng, et al. (2025). *CLASP: General-Purpose Clothes Manipulation with Semantic Keypoints*. arXiv:2502.17983.
-* Oquab, M., et al. (2023). *DINOv2: Learning Robust Visual Features without Supervision*. Transactions on Machine Learning Research.
+* Oquab, M., et al. (2023). *DINOv2: Learning Robust Visual Features without Supervision*. TMLR.
